@@ -22,6 +22,16 @@ const HERO_SPAWN_INTERVAL = 10_000;
 const ATTACK_INTERVAL = 2_000;
 const HARVEST_INTERVAL = 1_000;
 const WORKER_HARVEST_INTERVAL = 2_000;
+const SMITHY_COST = { wood: 40, stone: 40 };
+const MEDIC_TENT_COST = { wood: 30, stone: 20 };
+const HEAL_COST = 10;
+const HEAL_AMOUNT = 20;
+const GOBLIN_HIRE_COST = { wood: 20, stone: 20 };
+const MAX_ARMOR_UPGRADE = 4;
+const ARMOR_REDUCTION_PER_LEVEL = 2;
+const VILLAGE_MUSIC_KEY = 'village-music';
+const HIT_SOUND_KEY = 'hit-sound';
+const DEATH_SOUND_KEY = 'death-sound';
 
 type HeroKind = 'fighter' | 'archer' | 'wizard';
 type ResourceKind = 'wood' | 'stone';
@@ -30,10 +40,15 @@ interface LevelData {
   weapon?: WeaponKind;
   wood?: number;
   stone?: number;
+  score?: number;
+  armorLevel?: number;
+  smithyBuilt?: boolean;
+  medicTentBuilt?: boolean;
   goblinHealth?: number;
   weaponUpgrades?: WeaponUpgradeLevels;
   hiredKind?: HireKind;
   hiredWorkers?: WorkerKind[];
+  resourceLayout?: ResourcePlacement[];
 }
 
 interface HealthObjects {
@@ -97,6 +112,12 @@ interface ResourceNode {
   targetRing: Phaser.GameObjects.Ellipse;
 }
 
+interface ResourcePlacement {
+  kind: ResourceKind;
+  xRatio: number;
+  yRatio: number;
+}
+
 interface NavigationDetour {
   waypoint: Phaser.Math.Vector2;
   destination: Phaser.Math.Vector2;
@@ -106,6 +127,8 @@ type GoblinCommand =
   | { type: 'move'; point: Phaser.Math.Vector2 }
   | { type: 'attack'; hero: HeroUnit }
   | { type: 'harvest'; resource: ResourceNode };
+
+type ShopMode = 'home' | 'smithy' | 'medic';
 
 const HERO_DEFINITIONS: Record<HeroKind, {
   name: string;
@@ -131,9 +154,9 @@ const HERO_DEFINITIONS: Record<HeroKind, {
     name: 'Archer',
     frame: 99,
     health: 100,
-    damage: 10,
+    damage: 7,
     range: 116,
-    speed: 31,
+    speed: 42,
     projectile: true,
     projectileColor: 0xf1d89b,
   },
@@ -143,7 +166,7 @@ const HERO_DEFINITIONS: Record<HeroKind, {
     health: 60,
     damage: 17,
     range: 124,
-    speed: 28,
+    speed: 22,
     projectile: true,
     projectileColor: 0xd57cff,
   },
@@ -168,6 +191,10 @@ export class LevelOneScene extends Phaser.Scene {
   private weapon: WeaponKind = 'sword';
   private wood = 0;
   private stone = 0;
+  private score = 0;
+  private armorLevel = 0;
+  private smithyBuilt = false;
+  private medicTentBuilt = false;
   private savedGoblinHealth = GOBLIN_MAX_HEALTH;
   private weaponUpgrades: WeaponUpgradeLevels = { sword: 0, bow: 0, staff: 0 };
   private hiredKind?: HireKind;
@@ -178,6 +205,7 @@ export class LevelOneScene extends Phaser.Scene {
   private command?: GoblinCommand;
   private readonly heroes: HeroUnit[] = [];
   private readonly resources: ResourceNode[] = [];
+  private resourceLayout?: ResourcePlacement[];
   private resourceText?: Phaser.GameObjects.Text;
   private goblinStatusText?: Phaser.GameObjects.Text;
   private waveText?: Phaser.GameObjects.Text;
@@ -189,6 +217,9 @@ export class LevelOneScene extends Phaser.Scene {
     NavigationDetour
   >();
   private shopContainer?: Phaser.GameObjects.Container;
+  private smithyTarget?: Phaser.GameObjects.Zone;
+  private medicTentTarget?: Phaser.GameObjects.Zone;
+  private shopMode: ShopMode = 'home';
   private shopOpen = false;
   private nextSpawnAt = 0;
   private heroSequence = 0;
@@ -203,14 +234,21 @@ export class LevelOneScene extends Phaser.Scene {
     this.weapon = isWeaponKind(data.weapon) ? data.weapon : 'sword';
     this.wood = Math.max(data.wood ?? 0, progress.wood);
     this.stone = Math.max(data.stone ?? 0, progress.stone);
-    const savedUpgrades = data.weaponUpgrades ?? progress.weaponUpgrades;
+    this.score = Math.max(0, data.score ?? 0);
+    this.armorLevel = Math.min(
+      data.armorLevel ?? 0,
+      MAX_ARMOR_UPGRADE,
+    );
+    this.smithyBuilt = data.smithyBuilt ?? false;
+    this.medicTentBuilt = data.medicTentBuilt ?? false;
+    const savedUpgrades = data.weaponUpgrades ?? { sword: 0, bow: 0, staff: 0 };
     this.weaponUpgrades = {
       sword: Math.min(savedUpgrades.sword, MAX_WEAPON_UPGRADE),
       bow: Math.min(savedUpgrades.bow, MAX_WEAPON_UPGRADE),
       staff: Math.min(savedUpgrades.staff, MAX_WEAPON_UPGRADE),
     };
-    this.hiredKind = data.hiredKind ?? progress.hiredGoblin;
-    this.hiredWorkers = [...new Set(data.hiredWorkers ?? progress.hiredWorkers)];
+    this.hiredKind = data.hiredKind;
+    this.hiredWorkers = [...new Set(data.hiredWorkers ?? [])];
     this.savedGoblinHealth = data.goblinHealth ?? GOBLIN_MAX_HEALTH;
     this.goblin = undefined;
     this.companion = undefined;
@@ -218,6 +256,7 @@ export class LevelOneScene extends Phaser.Scene {
     this.command = undefined;
     this.heroes.length = 0;
     this.resources.length = 0;
+    this.resourceLayout = data.resourceLayout?.map((placement) => ({ ...placement }));
     this.resourceText = undefined;
     this.goblinStatusText = undefined;
     this.waveText = undefined;
@@ -225,6 +264,9 @@ export class LevelOneScene extends Phaser.Scene {
     this.obstacles = undefined;
     this.obstacleBounds.length = 0;
     this.shopContainer = undefined;
+    this.smithyTarget = undefined;
+    this.medicTentTarget = undefined;
+    this.shopMode = 'home';
     this.shopOpen = false;
     this.nextSpawnAt = 0;
     this.heroSequence = 0;
@@ -236,10 +278,15 @@ export class LevelOneScene extends Phaser.Scene {
       weapon: this.weapon,
       wood: this.wood,
       stone: this.stone,
+      score: this.score,
+      armorLevel: this.armorLevel,
+      smithyBuilt: this.smithyBuilt,
+      medicTentBuilt: this.medicTentBuilt,
       goblinHealth: this.goblin?.health ?? this.savedGoblinHealth,
       weaponUpgrades: { ...this.weaponUpgrades },
       hiredKind: this.hiredKind,
       hiredWorkers: [...this.hiredWorkers],
+      resourceLayout: this.resourceLayout?.map((placement) => ({ ...placement })),
     };
   }
 
@@ -253,6 +300,9 @@ export class LevelOneScene extends Phaser.Scene {
       frameHeight: 16,
     });
     this.load.image('roguelike-characters', 'assets/characters/roguelike-characters.png');
+    this.load.audio(VILLAGE_MUSIC_KEY, 'assets/audio/music/town-theme.mp3');
+    this.load.audio(HIT_SOUND_KEY, 'assets/audio/sfx/hit.mp3');
+    this.load.audio(DEATH_SOUND_KEY, 'assets/audio/sfx/death.mp3');
   }
 
   create(): void {
@@ -262,11 +312,14 @@ export class LevelOneScene extends Phaser.Scene {
     this.createCommandSurface();
     this.obstacles = this.physics.add.staticGroup();
     this.createHome();
+    if (this.smithyBuilt) this.createSmithy();
+    if (this.medicTentBuilt) this.createMedicTent();
     this.createResources();
     this.createGoblin();
     if (this.hiredKind) this.createCompanion(this.hiredKind);
     for (const worker of this.hiredWorkers) this.createWorker(worker);
     this.createHud();
+    this.startBackgroundMusic();
 
     this.nextSpawnAt = this.time.now + HERO_SPAWN_INTERVAL;
     this.time.addEvent({
@@ -283,6 +336,11 @@ export class LevelOneScene extends Phaser.Scene {
 
   update(): void {
     if (this.shopOpen) return;
+    if (this.gameOver) {
+      this.updateAttachedObjects();
+      this.updateHud();
+      return;
+    }
     this.updateGoblinCommand();
     this.updateCompanion();
     this.updateWorkers();
@@ -359,28 +417,108 @@ export class LevelOneScene extends Phaser.Scene {
         event: Phaser.Types.Input.EventData,
       ) => {
         event.stopPropagation();
-        this.openShop();
+        this.openShop('home');
+      },
+    );
+  }
+
+  private createSmithy(): void {
+    if (this.smithyTarget) return;
+    const portrait = this.scale.height > this.scale.width;
+    const x = portrait ? 164 : 190;
+    const y = portrait ? 142 : 112;
+    const smithy = this.add.graphics().setDepth(2);
+    smithy.fillStyle(0x4e4035, 1);
+    smithy.fillRoundedRect(x - 31, y - 18, 62, 43, 5);
+    smithy.fillStyle(0x2d2926, 1);
+    smithy.fillTriangle(x - 37, y - 16, x + 37, y - 16, x, y - 41);
+    smithy.fillStyle(0x59636a, 1);
+    smithy.fillRect(x + 17, y - 40, 11, 25);
+    smithy.fillStyle(0xd66a2f, 1);
+    smithy.fillRect(x - 23, y + 5, 18, 12);
+    smithy.lineStyle(2, 0xa07149, 1);
+    smithy.strokeRoundedRect(x - 31, y - 18, 62, 43, 5);
+
+    // Kenney Tiny Dungeon includes a clear anvil and forge flame. Together
+    // they make the small workshop readable without needing a custom asset.
+    this.add.image(x + 10, y + 7, 'tiny-dungeon', 64).setScale(2).setDepth(3);
+    this.add.image(x - 14, y + 1, 'tiny-dungeon', 29).setScale(1.4).setDepth(3);
+    this.addObstacle(x, y - 8, 72, 62);
+
+    this.smithyTarget = this.add
+      .zone(x, y - 8, 80, 74)
+      .setDepth(8)
+      .setInteractive({ useHandCursor: true });
+    this.smithyTarget.on(
+      'pointerdown',
+      (
+        _pointer: Phaser.Input.Pointer,
+        _localX: number,
+        _localY: number,
+        event: Phaser.Types.Input.EventData,
+      ) => {
+        event.stopPropagation();
+        this.openShop('smithy');
+      },
+    );
+  }
+
+  private createMedicTent(): void {
+    if (this.medicTentTarget) return;
+    const portrait = this.scale.height > this.scale.width;
+    const x = portrait ? 254 : 280;
+    const y = portrait ? 142 : 112;
+    const tent = this.add.graphics().setDepth(2);
+    tent.fillStyle(0xd8d1b7, 1);
+    tent.fillTriangle(x - 38, y + 23, x, y - 39, x + 38, y + 23);
+    tent.fillStyle(0xb9b397, 1);
+    tent.fillTriangle(x, y - 39, x + 38, y + 23, x + 13, y + 23);
+    tent.lineStyle(2, 0x615b4c, 1);
+    tent.strokeTriangle(x - 38, y + 23, x, y - 39, x + 38, y + 23);
+    tent.fillStyle(0x9b2f32, 1);
+    tent.fillRect(x - 5, y - 20, 10, 29);
+    tent.fillRect(x - 14, y - 11, 28, 10);
+    tent.fillStyle(0x493d35, 1);
+    tent.fillTriangle(x - 10, y + 23, x, y + 4, x + 10, y + 23);
+
+    // The red potion from Kenney Tiny Dungeon reinforces the healing use.
+    this.add.image(x + 23, y + 12, 'tiny-dungeon', 115).setScale(1.45).setDepth(3);
+    this.addObstacle(x, y - 5, 72, 62);
+
+    this.medicTentTarget = this.add
+      .zone(x, y - 5, 82, 76)
+      .setDepth(8)
+      .setInteractive({ useHandCursor: true });
+    this.medicTentTarget.on(
+      'pointerdown',
+      (
+        _pointer: Phaser.Input.Pointer,
+        _localX: number,
+        _localY: number,
+        event: Phaser.Types.Input.EventData,
+      ) => {
+        event.stopPropagation();
+        this.openShop('medic');
       },
     );
   }
 
   private createResources(): void {
-    const portrait = this.scale.height > this.scale.width;
-    const placements = portrait
-      ? [
-          { kind: 'wood' as const, name: 'TREE', x: 274, y: 172, frame: 5, scale: 4 },
-          { kind: 'stone' as const, name: 'BOULDER', x: 270, y: 390, frame: 43, scale: 3.5 },
-        ]
-      : [
-          { kind: 'wood' as const, name: 'TREE', x: 292, y: 116, frame: 5, scale: 4 },
-          { kind: 'stone' as const, name: 'BOULDER', x: 416, y: 246, frame: 43, scale: 3.5 },
-        ];
+    if (!this.resourceLayout || !this.isResourceLayoutValid(this.resourceLayout)) {
+      this.resourceLayout = this.generateResourceLayout();
+    }
+    const placements = this.resourceLayout.map((placement) => ({
+      kind: placement.kind,
+      name: placement.kind === 'wood' ? 'TREE' : 'BOULDER',
+      x: placement.xRatio * this.scale.width,
+      y: placement.yRatio * this.scale.height,
+    }));
 
     for (const placement of placements) {
       if (placement.kind === 'wood') {
         this.add.rectangle(placement.x, placement.y + 18, 12, 36, 0x6c4529, 1).setDepth(2);
         const imageY = placement.y - 8;
-        this.add.image(placement.x, imageY, 'tiny-town', placement.frame).setScale(placement.scale).setDepth(3);
+        this.add.image(placement.x, imageY, 'tiny-town', 5).setScale(4).setDepth(3);
         this.addObstacle(placement.x, placement.y + 2, 38, 62);
       } else {
         this.createBoulder(placement.x, placement.y);
@@ -421,6 +559,83 @@ export class LevelOneScene extends Phaser.Scene {
       );
       this.resources.push(resource);
     }
+  }
+
+  private generateResourceLayout(): ResourcePlacement[] {
+    const width = this.scale.width;
+    const height = this.scale.height;
+    const margin = 58;
+    const top = 92;
+    const portrait = height > width;
+    const reserved = [
+      new Phaser.Math.Vector2(portrait ? 74 : 100, portrait ? 142 : 112),
+      new Phaser.Math.Vector2(portrait ? 164 : 190, portrait ? 142 : 112),
+      new Phaser.Math.Vector2(portrait ? 254 : 280, portrait ? 142 : 112),
+      new Phaser.Math.Vector2(portrait ? 160 : 224, portrait ? 292 : 214),
+    ];
+
+    const kinds: ResourceKind[] = ['wood', 'stone', 'wood', 'stone', 'wood', 'stone'];
+    const points: Phaser.Math.Vector2[] = [];
+    const placements: ResourcePlacement[] = [];
+    for (const kind of kinds) {
+      let point: Phaser.Math.Vector2 | undefined;
+      for (let attempt = 0; attempt < 160; attempt += 1) {
+        const candidate = new Phaser.Math.Vector2(
+          Phaser.Math.Between(margin, width - margin),
+          Phaser.Math.Between(top, height - margin),
+        );
+        const clearsBuildings = reserved.every((item) => item.distance(candidate) >= 112);
+        const clearsResources = points.every((item) => item.distance(candidate) >= 96);
+        if (clearsBuildings && clearsResources) {
+          point = candidate;
+          break;
+        }
+      }
+      if (!point) {
+        const index = placements.length;
+        const columns = portrait ? 2 : 3;
+        const rows = Math.ceil(kinds.length / columns);
+        point = new Phaser.Math.Vector2(
+          Phaser.Math.Linear(margin, width - margin, (index % columns + 0.5) / columns),
+          Phaser.Math.Linear(top + 90, height - margin, (Math.floor(index / columns) + 0.5) / rows),
+        );
+      }
+      points.push(point);
+      placements.push({
+        kind,
+        xRatio: point.x / width,
+        yRatio: point.y / height,
+      });
+    }
+    return placements;
+  }
+
+  private isResourceLayoutValid(layout: ResourcePlacement[]): boolean {
+    if (layout.length !== 6) return false;
+    const woodCount = layout.filter((placement) => placement.kind === 'wood').length;
+    const stoneCount = layout.filter((placement) => placement.kind === 'stone').length;
+    if (woodCount !== 3 || stoneCount !== 3) return false;
+    const width = this.scale.width;
+    const height = this.scale.height;
+    const portrait = height > width;
+    const reserved = [
+      new Phaser.Math.Vector2(portrait ? 74 : 100, portrait ? 142 : 112),
+      new Phaser.Math.Vector2(portrait ? 164 : 190, portrait ? 142 : 112),
+      new Phaser.Math.Vector2(portrait ? 254 : 280, portrait ? 142 : 112),
+      new Phaser.Math.Vector2(portrait ? 160 : 224, portrait ? 292 : 214),
+    ];
+    const points = layout.map((placement) => new Phaser.Math.Vector2(
+      placement.xRatio * width,
+      placement.yRatio * height,
+    ));
+    return points.every((point, index) =>
+      point.x >= 58
+      && point.x <= width - 58
+      && point.y >= 92
+      && point.y <= height - 58
+      && reserved.every((item) => item.distance(point) >= 92)
+      && points.every((other, otherIndex) => otherIndex === index || other.distance(point) >= 76)
+    );
   }
 
   private createGoblin(): void {
@@ -872,17 +1087,22 @@ export class LevelOneScene extends Phaser.Scene {
   }
 
   private damageHero(hero: HeroUnit, amount: number): void {
-    if (!hero.alive) return;
+    if (this.gameOver || !hero.alive) return;
     hero.health = Math.max(0, hero.health - amount);
     this.setHealthBar(hero.healthObjects, hero.health, hero.maxHealth);
     this.flashDamage(hero.sprite);
+    this.playCombatSound(hero.health === 0);
     this.showFloatingText(hero.sprite.x, hero.sprite.y - 16, `-${amount}`, 0xffe0b2);
     this.updateAccessibilityState();
     if (hero.health > 0) return;
 
     hero.alive = false;
+    this.score += 1;
     hero.hitTarget.disableInteractive();
-    hero.sprite.setVelocity(0, 0).clearTint().setTint(0x555555).setAlpha(0.6).setAngle(90);
+    hero.sprite.setVelocity(0, 0).setAlpha(0.6).setAngle(90);
+    this.time.delayedCall(90, () => {
+      if (hero.sprite.active) hero.sprite.clearTint().setTint(0x555555);
+    });
     hero.targetRing.setVisible(false);
     if (this.command?.type === 'attack' && this.command.hero === hero) this.command = undefined;
     this.refreshCommandIndicators();
@@ -892,15 +1112,20 @@ export class LevelOneScene extends Phaser.Scene {
 
   private damageFriendly(target: FriendlyUnit, amount: number): void {
     if (!target.alive) return;
-    target.health = Math.max(0, target.health - amount);
+    const armorReduction = target === this.goblin
+      ? this.armorLevel * ARMOR_REDUCTION_PER_LEVEL
+      : 0;
+    const appliedDamage = Math.max(1, amount - armorReduction);
+    target.health = Math.max(0, target.health - appliedDamage);
     this.setHealthBar(target.healthObjects, target.health, GOBLIN_MAX_HEALTH);
     this.flashDamage(target.sprite);
-    this.showFloatingText(target.sprite.x, target.sprite.y - 18, `-${amount}`, 0xff9b85);
+    this.playCombatSound(target.health === 0);
+    this.showFloatingText(target.sprite.x, target.sprite.y - 18, `-${appliedDamage}`, 0xff9b85);
     this.updateAccessibilityState();
     if (target.health > 0) return;
 
     target.alive = false;
-    target.sprite.setVelocity(0, 0).clearTint().setTint(0x555555).setAlpha(0.65).setAngle(90);
+    this.animateGoblinDeath(target);
     if (target !== this.goblin) {
       target.label.setText('DOWN');
       this.updateAccessibilityState();
@@ -909,9 +1134,75 @@ export class LevelOneScene extends Phaser.Scene {
 
     this.command = undefined;
     this.gameOver = true;
+    this.score = 0;
+    this.armorLevel = 0;
+    this.weaponUpgrades = { sword: 0, bow: 0, staff: 0 };
+    this.smithyBuilt = false;
+    this.medicTentBuilt = false;
+    this.hiredKind = undefined;
+    this.hiredWorkers = [];
+    this.companion?.sprite.setVelocity(0, 0);
+    for (const worker of this.workers) worker.sprite.setVelocity(0, 0);
+    for (const hero of this.heroes) hero.sprite.setVelocity(0, 0);
+    this.persistProgress();
     this.refreshCommandIndicators();
     this.showGameOver();
     this.updateAccessibilityState();
+  }
+
+  private startBackgroundMusic(): void {
+    let music = this.sound.getAll(VILLAGE_MUSIC_KEY)[0];
+    if (!music) {
+      music = this.sound.add(VILLAGE_MUSIC_KEY, {
+        loop: true,
+        volume: 0.18,
+      });
+    }
+
+    const play = (): void => {
+      if (!music.isPlaying) music.play();
+    };
+    if (this.sound.locked) this.sound.once(Phaser.Sound.Events.UNLOCKED, play);
+    else play();
+  }
+
+  private playCombatSound(isDeath: boolean): void {
+    this.sound.play(isDeath ? DEATH_SOUND_KEY : HIT_SOUND_KEY, {
+      volume: isDeath ? 0.55 : 0.38,
+      detune: Phaser.Math.Between(-80, 80),
+    });
+  }
+
+  private animateGoblinDeath(target: FriendlyUnit): void {
+    target.sprite.setVelocity(0, 0);
+    const mainGoblin = this.goblin;
+    if (mainGoblin && target === mainGoblin) mainGoblin.selectionRing.setVisible(false);
+
+    this.tweens.add({
+      targets: target.sprite,
+      angle: 90,
+      y: target.sprite.y + 5,
+      duration: 280,
+      ease: 'Cubic.Out',
+    });
+    this.time.delayedCall(90, () => {
+      if (target.sprite.active) target.sprite.clearTint().setTint(0x555555);
+    });
+
+    const deathObjects: Phaser.GameObjects.GameObject[] = [
+      target.sprite,
+      target.label,
+      target.healthObjects.background,
+      target.healthObjects.fill,
+    ];
+    this.time.delayedCall(2_000, () => {
+      this.tweens.add({
+        targets: deathObjects,
+        alpha: 0,
+        duration: 500,
+        ease: 'Sine.In',
+      });
+    });
   }
 
   private updateAttachedObjects(): void {
@@ -950,10 +1241,11 @@ export class LevelOneScene extends Phaser.Scene {
     this.resourceText?.setText([`WOOD ${this.wood}`, `STONE ${this.stone}`]);
     this.goblinStatusText?.setText([
       `LEVEL 1 · ${WEAPONS[this.weapon].label.toUpperCase()} +${this.weaponUpgrades[this.weapon]}`,
-      `HP ${goblin?.health ?? 0}/${GOBLIN_MAX_HEALTH} · ${order}`,
+      `HP ${goblin?.health ?? 0}/${GOBLIN_MAX_HEALTH} · ARMOR +${this.armorLevel} · ${order}`,
     ]);
     const seconds = Math.max(0, Math.ceil((this.nextSpawnAt - this.time.now) / 1000));
     this.waveText?.setText([
+      `POINTS ${this.score}`,
       `HEROES ${this.heroes.filter((hero) => hero.alive).length}`,
       this.gameOver ? 'WAVES STOPPED' : `NEXT ${seconds}s`,
     ]);
@@ -1208,8 +1500,9 @@ export class LevelOneScene extends Phaser.Scene {
     hero.healthObjects.fill.destroy();
   }
 
-  private openShop(): void {
+  private openShop(mode: ShopMode): void {
     if (this.shopOpen || this.gameOver) return;
+    this.shopMode = mode;
     this.shopOpen = true;
     this.goblin?.sprite.setVelocity(0, 0);
     this.companion?.sprite.setVelocity(0, 0);
@@ -1256,8 +1549,13 @@ export class LevelOneScene extends Phaser.Scene {
     const panel = this.add
       .rectangle(width / 2, top + panelHeight / 2, panelWidth, panelHeight, 0x17271b, 1)
       .setStrokeStyle(3, 0x9bc865, 1);
+    const shopTitle = this.shopMode === 'smithy'
+      ? 'GOBLIN SMITHY'
+      : this.shopMode === 'medic'
+        ? 'MEDIC TENT'
+        : 'GOBLIN HOME';
     const title = this.add
-      .text(width / 2, top + 16, 'GOBLIN HOME · UPGRADES', {
+      .text(width / 2, top + 16, shopTitle, {
         fontFamily: 'monospace',
         fontSize: portrait ? '15px' : '14px',
         color: '#d7ef8c',
@@ -1273,31 +1571,44 @@ export class LevelOneScene extends Phaser.Scene {
       .setOrigin(0.5, 0);
     container.add([overlay, panel, title, inventory]);
 
-    const cost = this.getUpgradeCost(this.weapon);
-    const currentLevel = this.weaponUpgrades[this.weapon];
-    const currentDamage = WEAPONS[this.weapon].damage + currentLevel * 5;
-    const atMaxLevel = currentLevel >= MAX_WEAPON_UPGRADE;
-    const costLabel = [
-      cost.wood > 0 ? `${cost.wood} WOOD` : '',
-      cost.stone > 0 ? `${cost.stone} STONE` : '',
-    ].filter(Boolean).join(' + ');
+    if (this.shopMode === 'smithy') {
+      this.renderSmithyShop(container, top, panelHeight, panelWidth);
+      return;
+    }
+    if (this.shopMode === 'medic') {
+      this.renderMedicTent(container, top, panelHeight, panelWidth);
+      return;
+    }
+
     const upgradeY = portrait ? top + 105 : top + 88;
     this.createShopButton(
       container,
-      width / 2,
+      width / 2 - (portrait ? 101 : 165),
       upgradeY,
-      portrait ? panelWidth - 36 : 310,
+      portrait ? 190 : 310,
       portrait ? 70 : 48,
-      atMaxLevel
-        ? `${WEAPONS[this.weapon].label.toUpperCase()}  MAX LEVEL ${MAX_WEAPON_UPGRADE}\n${currentDamage} DAMAGE · BEST WEAPON EQUIPPED`
-        : `UPGRADE ${WEAPONS[this.weapon].label.toUpperCase()}  LV ${currentLevel} → ${currentLevel + 1}\n${currentDamage} → ${currentDamage + 5} DAMAGE  ·  ${costLabel}`,
-      !atMaxLevel && this.canAfford(cost),
-      () => this.purchaseWeaponUpgrade(),
+      this.smithyBuilt
+        ? 'SMITHY BUILT\nTAP WORKSHOP TO UPGRADE'
+        : `BUILD SMITHY\n${SMITHY_COST.wood} WOOD + ${SMITHY_COST.stone} STONE`,
+      !this.smithyBuilt && this.canAfford(SMITHY_COST),
+      () => this.purchaseSmithy(),
+    );
+    this.createShopButton(
+      container,
+      width / 2 + (portrait ? 101 : 165),
+      upgradeY,
+      portrait ? 190 : 310,
+      portrait ? 70 : 48,
+      this.medicTentBuilt
+        ? 'MEDIC TENT BUILT\nTAP TENT TO HEAL'
+        : `BUILD MEDIC TENT\n${MEDIC_TENT_COST.wood} WOOD + ${MEDIC_TENT_COST.stone} STONE`,
+      !this.medicTentBuilt && this.canAfford(MEDIC_TENT_COST),
+      () => this.purchaseMedicTent(),
     );
 
     const hireHeadingY = portrait ? top + 155 : top + 124;
     const hireHeading = this.add
-      .text(width / 2, hireHeadingY, 'COMBAT GOBLIN · 30 WOOD + 30 STONE', {
+      .text(width / 2, hireHeadingY, `COMBAT GOBLIN · ${GOBLIN_HIRE_COST.wood} WOOD + ${GOBLIN_HIRE_COST.stone} STONE`, {
         fontFamily: 'monospace',
         fontSize: portrait ? '9px' : '10px',
         color: '#bfe7ff',
@@ -1321,7 +1632,7 @@ export class LevelOneScene extends Phaser.Scene {
         .setOrigin(0.5);
       container.add(status);
     } else {
-      const canHire = this.wood >= 30 && this.stone >= 30;
+      const canHire = this.canAfford(GOBLIN_HIRE_COST);
       const kinds: HireKind[] = ['warrior', 'archer', 'mage'];
       kinds.forEach((kind, index) => {
         const definition = COMPANION_DEFINITIONS[kind];
@@ -1346,7 +1657,7 @@ export class LevelOneScene extends Phaser.Scene {
     }
 
     const workerHeading = this.add
-      .text(width / 2, portrait ? top + 318 : top + 210, 'RESOURCE GOBLINS · 30 WOOD + 30 STONE EACH', {
+      .text(width / 2, portrait ? top + 318 : top + 210, `RESOURCE GOBLINS · ${GOBLIN_HIRE_COST.wood} WOOD + ${GOBLIN_HIRE_COST.stone} STONE EACH`, {
         fontFamily: 'monospace',
         fontSize: portrait ? '9px' : '10px',
         color: '#ffe39a',
@@ -1360,7 +1671,7 @@ export class LevelOneScene extends Phaser.Scene {
     workerKinds.forEach((kind, index) => {
       const definition = WORKER_DEFINITIONS[kind];
       const hired = this.hiredWorkers.includes(kind);
-      const canHire = !hired && this.wood >= 30 && this.stone >= 30;
+      const canHire = !hired && this.canAfford(GOBLIN_HIRE_COST);
       this.createShopButton(
         container,
         width / 2 + (index === 0 ? -1 : 1) * (portrait ? 82 : 142),
@@ -1375,6 +1686,98 @@ export class LevelOneScene extends Phaser.Scene {
       );
     });
 
+    this.createShopButton(
+      container,
+      width / 2,
+      top + panelHeight - 28,
+      portrait ? 190 : 150,
+      38,
+      'CLOSE',
+      true,
+      () => this.closeShop(),
+    );
+  }
+
+  private renderSmithyShop(
+    container: Phaser.GameObjects.Container,
+    top: number,
+    panelHeight: number,
+    panelWidth: number,
+  ): void {
+    const portrait = this.scale.height > this.scale.width;
+    const width = this.scale.width;
+    const weaponCost = this.getUpgradeCost(this.weapon);
+    const weaponLevel = this.weaponUpgrades[this.weapon];
+    const weaponDamage = WEAPONS[this.weapon].damage + weaponLevel * 5;
+    const weaponAtMax = weaponLevel >= MAX_WEAPON_UPGRADE;
+    const weaponCostLabel = [
+      weaponCost.wood > 0 ? `${weaponCost.wood} WOOD` : '',
+      weaponCost.stone > 0 ? `${weaponCost.stone} STONE` : '',
+    ].filter(Boolean).join(' + ');
+    this.createShopButton(
+      container,
+      width / 2,
+      portrait ? top + 145 : top + 115,
+      portrait ? panelWidth - 38 : 360,
+      portrait ? 82 : 68,
+      weaponAtMax
+        ? `${WEAPONS[this.weapon].label.toUpperCase()} · MAX LEVEL ${MAX_WEAPON_UPGRADE}\n${weaponDamage} DAMAGE`
+        : `UPGRADE ${WEAPONS[this.weapon].label.toUpperCase()} · LV ${weaponLevel} → ${weaponLevel + 1}\n${weaponDamage} → ${weaponDamage + 5} DAMAGE · ${weaponCostLabel}`,
+      !weaponAtMax && this.canAfford(weaponCost),
+      () => this.purchaseWeaponUpgrade(),
+    );
+
+    const armorCost = this.getArmorUpgradeCost();
+    const armorAtMax = this.armorLevel >= MAX_ARMOR_UPGRADE;
+    this.createShopButton(
+      container,
+      width / 2,
+      portrait ? top + 270 : top + 205,
+      portrait ? panelWidth - 38 : 360,
+      portrait ? 82 : 68,
+      armorAtMax
+        ? `ARMOR · MAX LEVEL ${MAX_ARMOR_UPGRADE}\n-${this.armorLevel * ARMOR_REDUCTION_PER_LEVEL} DAMAGE PER HIT`
+        : `UPGRADE ARMOR · LV ${this.armorLevel} → ${this.armorLevel + 1}\n-${(this.armorLevel + 1) * ARMOR_REDUCTION_PER_LEVEL} DAMAGE PER HIT · ${armorCost.wood} WOOD + ${armorCost.stone} STONE`,
+      !armorAtMax && this.canAfford(armorCost),
+      () => this.purchaseArmorUpgrade(),
+    );
+
+    this.createShopButton(
+      container,
+      width / 2,
+      top + panelHeight - 28,
+      portrait ? 190 : 150,
+      38,
+      'CLOSE',
+      true,
+      () => this.closeShop(),
+    );
+  }
+
+  private renderMedicTent(
+    container: Phaser.GameObjects.Container,
+    top: number,
+    panelHeight: number,
+    panelWidth: number,
+  ): void {
+    const portrait = this.scale.height > this.scale.width;
+    const width = this.scale.width;
+    const health = this.goblin?.health ?? 0;
+    const missingHealth = GOBLIN_MAX_HEALTH - health;
+    const healAmount = Math.min(HEAL_AMOUNT, missingHealth);
+    const canHeal = Boolean(this.goblin?.alive) && missingHealth > 0 && this.wood >= HEAL_COST;
+    this.createShopButton(
+      container,
+      width / 2,
+      portrait ? top + 165 : top + 135,
+      portrait ? panelWidth - 38 : 380,
+      portrait ? 92 : 74,
+      missingHealth <= 0
+        ? `GOBLIN HP ${health}/${GOBLIN_MAX_HEALTH}\nALREADY AT FULL HEALTH`
+        : `HEAL ${healAmount} HP · ${HEAL_COST} WOOD\nGOBLIN HP ${health}/${GOBLIN_MAX_HEALTH}`,
+      canHeal,
+      () => this.purchaseHealing(),
+    );
     this.createShopButton(
       container,
       width / 2,
@@ -1433,6 +1836,11 @@ export class LevelOneScene extends Phaser.Scene {
     return { wood: 5 + level * 5, stone: 5 + level * 5 };
   }
 
+  private getArmorUpgradeCost(): { wood: number; stone: number } {
+    const cost = 10 + this.armorLevel * 10;
+    return { wood: cost, stone: cost };
+  }
+
   private canAfford(cost: { wood: number; stone: number }): boolean {
     return this.wood >= cost.wood && this.stone >= cost.stone;
   }
@@ -1452,8 +1860,54 @@ export class LevelOneScene extends Phaser.Scene {
     this.updateAccessibilityState();
   }
 
+  private purchaseSmithy(): void {
+    if (this.smithyBuilt || !this.canAfford(SMITHY_COST)) return;
+    this.wood -= SMITHY_COST.wood;
+    this.stone -= SMITHY_COST.stone;
+    this.smithyBuilt = true;
+    this.createSmithy();
+    this.persistProgress();
+    this.renderShop();
+    this.updateAccessibilityState();
+  }
+
+  private purchaseMedicTent(): void {
+    if (this.medicTentBuilt || !this.canAfford(MEDIC_TENT_COST)) return;
+    this.wood -= MEDIC_TENT_COST.wood;
+    this.stone -= MEDIC_TENT_COST.stone;
+    this.medicTentBuilt = true;
+    this.createMedicTent();
+    this.persistProgress();
+    this.renderShop();
+    this.updateAccessibilityState();
+  }
+
+  private purchaseHealing(): void {
+    const goblin = this.goblin;
+    if (!goblin?.alive || goblin.health >= GOBLIN_MAX_HEALTH || this.wood < HEAL_COST) return;
+    this.wood -= HEAL_COST;
+    goblin.health = Math.min(GOBLIN_MAX_HEALTH, goblin.health + HEAL_AMOUNT);
+    this.savedGoblinHealth = goblin.health;
+    this.setHealthBar(goblin.healthObjects, goblin.health, GOBLIN_MAX_HEALTH);
+    this.persistProgress();
+    this.renderShop();
+    this.updateAccessibilityState();
+  }
+
+  private purchaseArmorUpgrade(): void {
+    if (this.armorLevel >= MAX_ARMOR_UPGRADE) return;
+    const cost = this.getArmorUpgradeCost();
+    if (!this.canAfford(cost)) return;
+    this.wood -= cost.wood;
+    this.stone -= cost.stone;
+    this.armorLevel += 1;
+    this.persistProgress();
+    this.renderShop();
+    this.updateAccessibilityState();
+  }
+
   private purchaseCompanion(kind: HireKind): void {
-    const cost = { wood: 30, stone: 30 };
+    const cost = GOBLIN_HIRE_COST;
     if (this.hiredKind || !this.canAfford(cost)) return;
     this.wood -= cost.wood;
     this.stone -= cost.stone;
@@ -1465,7 +1919,7 @@ export class LevelOneScene extends Phaser.Scene {
   }
 
   private purchaseWorker(kind: WorkerKind): void {
-    const cost = { wood: 30, stone: 30 };
+    const cost = GOBLIN_HIRE_COST;
     if (this.hiredWorkers.includes(kind) || !this.canAfford(cost)) return;
     this.wood -= cost.wood;
     this.stone -= cost.stone;
@@ -1480,9 +1934,6 @@ export class LevelOneScene extends Phaser.Scene {
     saveProgress({
       wood: this.wood,
       stone: this.stone,
-      weaponUpgrades: { ...this.weaponUpgrades },
-      hiredGoblin: this.hiredKind,
-      hiredWorkers: [...this.hiredWorkers],
     });
   }
 
@@ -1520,7 +1971,16 @@ export class LevelOneScene extends Phaser.Scene {
       .setDepth(32)
       .setInteractive({ useHandCursor: true });
     const restart = (): void => {
-      this.scene.restart({ ...this.getRestartData(), goblinHealth: GOBLIN_MAX_HEALTH });
+      this.scene.restart({
+        ...this.getRestartData(),
+        score: 0,
+        armorLevel: 0,
+        weaponUpgrades: { sword: 0, bow: 0, staff: 0 },
+        smithyBuilt: false,
+        medicTentBuilt: false,
+        resourceLayout: undefined,
+        goblinHealth: GOBLIN_MAX_HEALTH,
+      });
     };
     button.on('pointerdown', restart);
     label.on('pointerdown', restart);
@@ -1530,7 +1990,7 @@ export class LevelOneScene extends Phaser.Scene {
 
   private updateAccessibilityState(): void {
     const goblin = this.goblin;
-    const order = this.shopOpen ? 'shopping' : this.command?.type ?? 'idle';
+    const order = this.shopOpen ? `shopping at ${this.shopMode}` : this.command?.type ?? 'idle';
     const weaponLevel = this.weaponUpgrades[this.weapon];
     const weaponDamage = WEAPONS[this.weapon].damage + weaponLevel * 5;
     const companionStatus = this.companion
@@ -1544,21 +2004,26 @@ export class LevelOneScene extends Phaser.Scene {
     canvas.tabIndex = 0;
     canvas.setAttribute(
       'aria-label',
-      `Goblin Village Level 1. Weapon ${this.weapon}, upgrade level ${weaponLevel}, damage ${weaponDamage}. Goblin health ${goblin?.health ?? 0} of ${GOBLIN_MAX_HEALTH}. Wood ${this.wood}. Stone ${this.stone}. Current order ${order}. Hired fighter ${companionStatus}. Resource workers ${workerStatus}. Active heroes ${this.heroes.filter((hero) => hero.alive).length}.`,
+      `Goblin Village Level 1. Score ${this.score}. Weapon ${this.weapon}, upgrade level ${weaponLevel}, damage ${weaponDamage}. Armor level ${this.armorLevel}, reducing each hit by ${this.armorLevel * ARMOR_REDUCTION_PER_LEVEL}. Smithy ${this.smithyBuilt ? 'built' : 'not built'}. Medic tent ${this.medicTentBuilt ? 'built' : 'not built'}. Goblin health ${goblin?.health ?? 0} of ${GOBLIN_MAX_HEALTH}. Wood ${this.wood}. Stone ${this.stone}. Current order ${order}. Hired fighter ${companionStatus}. Resource workers ${workerStatus}. Resource nodes ${this.resources.length}. Active heroes ${this.heroes.filter((hero) => hero.alive).length}.`,
     );
     canvas.dataset.scene = 'level-one';
     canvas.dataset.weapon = this.weapon;
     canvas.dataset.attackStyle = WEAPONS[this.weapon].projectile ? 'projectile' : 'melee';
     canvas.dataset.weaponLevel = String(weaponLevel);
     canvas.dataset.weaponDamage = String(weaponDamage);
+    canvas.dataset.armorLevel = String(this.armorLevel);
+    canvas.dataset.smithyBuilt = String(this.smithyBuilt);
+    canvas.dataset.medicTentBuilt = String(this.medicTentBuilt);
     canvas.dataset.goblinHealth = String(goblin?.health ?? 0);
     canvas.dataset.wood = String(this.wood);
     canvas.dataset.stone = String(this.stone);
+    canvas.dataset.score = String(this.score);
     canvas.dataset.order = order;
     canvas.dataset.shopOpen = String(this.shopOpen);
     canvas.dataset.companion = this.companion?.kind ?? 'none';
     canvas.dataset.companionHealth = String(this.companion?.health ?? 0);
     canvas.dataset.workers = this.workers.map((worker) => worker.kind).join(',') || 'none';
+    canvas.dataset.resourceNodes = String(this.resources.length);
     canvas.dataset.activeHeroes = String(this.heroes.filter((hero) => hero.alive).length);
   }
 }

@@ -46,3 +46,5 @@ Each music item was verified on its individual page rather than inferred from a 
 | `boss-battle.wav` | Epic Boss Battle (Seamlessly Looping) | Juhani Junkala / SubspaceAudio | [Source page](https://opengameart.org/content/boss-battle-music) |
 
 Music source files are stored in `assets/source/opengameart/music/`. The Town Theme source page requests the text `cynicmusic.com pixelsphere.org`; preserve that voluntary credit in the released game's credits.
+
+The current prototype loops `town-theme.mp3` during Level 1. Combat uses `knifeSlice2.ogg` and `dropLeather.ogg` from Kenney's RPG Audio pack; the runtime copies under `public/assets/audio/` were converted to MP3 for broad mobile-browser playback.

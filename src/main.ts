@@ -9,7 +9,7 @@ const orientation = (): Orientation =>
   window.innerWidth >= window.innerHeight ? 'landscape' : 'portrait';
 
 const gameSize = (value: Orientation): { width: number; height: number } =>
-  value === 'landscape' ? { width: 640, height: 360 } : { width: 360, height: 640 };
+  value === 'landscape' ? { width: 800, height: 450 } : { width: 450, height: 800 };
 
 let currentOrientation = orientation();
 const initialSize = gameSize(currentOrientation);

@@ -2,11 +2,10 @@ import Phaser from 'phaser';
 import {
   createGoblinTexture,
   isWeaponKind,
-  MAX_WEAPON_UPGRADE,
   WEAPONS,
   type WeaponKind,
 } from '../game/goblinAppearance';
-import { loadProgress, type WeaponUpgradeLevels } from '../game/playerProgress';
+import { type WeaponUpgradeLevels } from '../game/playerProgress';
 
 interface IntroData {
   weapon?: WeaponKind;
@@ -29,13 +28,8 @@ export class IntroScene extends Phaser.Scene {
   }
 
   init(data: IntroData): void {
-    const progress = loadProgress();
     this.weapon = isWeaponKind(data.weapon) ? data.weapon : 'sword';
-    this.weaponUpgrades = {
-      sword: Math.min(progress.weaponUpgrades.sword, MAX_WEAPON_UPGRADE),
-      bow: Math.min(progress.weaponUpgrades.bow, MAX_WEAPON_UPGRADE),
-      staff: Math.min(progress.weaponUpgrades.staff, MAX_WEAPON_UPGRADE),
-    };
+    this.weaponUpgrades = { sword: 0, bow: 0, staff: 0 };
     this.weaponButtons.length = 0;
     this.preview = undefined;
   }
